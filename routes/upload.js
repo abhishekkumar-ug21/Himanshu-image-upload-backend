@@ -3,6 +3,7 @@ const sharp = require("sharp");
 const upload = require("../config/multer");
 const cloudinary = require("../config/cloudinary");
 const axios = require("axios");
+const streamifier = require("streamifier");
 
 const router = express.Router();
 
@@ -13,59 +14,64 @@ const sizes = [
     { width: 300, height: 600, name: "300x600" },
 ];
 
+// Function to upload resized images to Cloudinary using Promises
+const uploadToCloudinary = (buffer, sizeName) => {
+    return new Promise((resolve, reject) => {
+        const uploadStream = cloudinary.uploader.upload_stream(
+            { folder: "resized", format: "png", public_id: `${sizeName}-${Date.now()}` },
+            (error, result) => {
+                if (error) {
+                    reject(error);
+                } else {
+                    resolve(result.secure_url);
+                }
+            }
+        );
+
+        streamifier.createReadStream(buffer).pipe(uploadStream);
+    });
+};
+
 router.post("/", upload.single("image"), async (req, res) => {
     if (!req.file || !req.file.path) {
         return res.status(400).json({ error: "No file uploaded" });
     }
 
-    const originalImageUrl = req.file.path; // Cloudinary image URL
+    const originalImageUrl = req.file.path;
     console.log("File uploaded to Cloudinary:", originalImageUrl);
-
-    const resizedImages = [];
 
     try {
         console.log("Fetching image from Cloudinary...");
-        
+
         // Fetch image from Cloudinary
         const response = await axios({
             url: originalImageUrl,
-            responseType: "arraybuffer", // Get binary data
+            responseType: "arraybuffer",
         });
 
-        const imageBuffer = Buffer.from(response.data); // Convert to Buffer
+        const imageBuffer = Buffer.from(response.data);
 
         console.log("Starting image processing...");
-        await Promise.all(
+        const resizedImages = await Promise.all(
             sizes.map(async (size) => {
                 try {
-                    // Resize image with Sharp
+                    // Resize image
                     const resizedBuffer = await sharp(imageBuffer)
                         .resize(size.width, size.height)
                         .toBuffer();
 
-                    // Upload resized image to Cloudinary
-                    const result = await cloudinary.uploader.upload_stream(
-                        { folder: "resized", format: "png" },
-                        (error, cloudinaryResult) => {
-                            if (error) {
-                                console.error("Cloudinary upload error:", error);
-                            } else {
-                                resizedImages.push({
-                                    size: size.name,
-                                    url: cloudinaryResult.secure_url,
-                                });
-                            }
-                        }
-                    ).end(resizedBuffer);
-
+                    // Upload to Cloudinary
+                    const url = await uploadToCloudinary(resizedBuffer, size.name);
+                    return { size: size.name, url };
                 } catch (resizeError) {
                     console.error(`Error resizing to ${size.name}:`, resizeError);
+                    return null;
                 }
             })
         );
 
         console.log("Processing complete. Sending response.");
-        res.json({ success: true, images: resizedImages });
+        res.json({ success: true, images: resizedImages.filter((img) => img !== null) });
     } catch (error) {
         console.error("Unexpected error processing image:", error);
         res.status(500).json({ error: "Image processing failed" });
